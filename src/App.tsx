@@ -95,11 +95,19 @@ function App() {
   const [currentSpeaker, setCurrentSpeaker] = useState<'Advisor' | 'Client' | null>(null)
   const [isProcessing, setIsProcessing] = useState(false)
   const [interimTranscript, setInterimTranscript] = useState('')
+  const [voiceActivity, setVoiceActivity] = useState(false)
+  const [speakerPauses, setSpeakerPauses] = useState<number[]>([])
+  const [lastSpeaker, setLastSpeaker] = useState<'Advisor' | 'Client' | null>(null)
   
   const transcriptRef = useRef<HTMLDivElement>(null)
   const insightsRef = useRef<HTMLDivElement>(null)
   const knowledgeRef = useRef<HTMLDivElement>(null)
   const recognitionRef = useRef<SpeechRecognition | null>(null)
+  const audioContextRef = useRef<AudioContext | null>(null)
+  const analyserRef = useRef<AnalyserNode | null>(null)
+  const streamRef = useRef<MediaStream | null>(null)
+  const volumeCheckInterval = useRef<NodeJS.Timeout | null>(null)
+  const speakerTimeoutRef = useRef<NodeJS.Timeout | null>(null)
 
   const mockTranscriptData = [
     { speaker: 'Advisor' as const, text: "Thank you for coming in. Please, take a seat. How can I help you today?" },
@@ -124,7 +132,7 @@ function App() {
     { title: "Learned Knowledge: Gloucester Council Housing Support", source: "Learned Knowledge", snippet: "Recent cases show that the council's discretionary housing payment has been successful for short-term rent shortfalls for clients in similar situations." }
   ]
 
-  // Initialize speech recognition
+  // Initialize speech recognition and voice activity detection
   useEffect(() => {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition
     if (SpeechRecognition) {
@@ -174,6 +182,9 @@ function App() {
       
       recognitionRef.current = recognition
     }
+
+    // Initialize voice activity detection
+    initializeVoiceActivityDetection()
   }, [])
 
   const processTranscript = async (transcript: string) => {
@@ -183,8 +194,9 @@ function App() {
     setInterimTranscript('')
     
     try {
-      // Determine speaker using simple heuristics (in real app, this would be more sophisticated)
+      // Determine speaker using enhanced detection
       const speaker = determineSpeaker(transcript)
+      setCurrentSpeaker(speaker)
       
       const newItem: TranscriptItem = {
         id: `transcript-${Date.now()}`,
@@ -209,15 +221,129 @@ function App() {
   }
 
   const determineSpeaker = (transcript: string): 'Advisor' | 'Client' => {
-    // Simple heuristics - in real app this would use speaker identification
-    const advisorKeywords = ['help', 'support', 'check', 'eligibility', 'benefits', 'allowance', 'services']
-    const clientKeywords = ['worried', 'mum', 'mother', 'frustrated', 'don\'t know', 'scared']
+    // Enhanced speaker identification using voice activity patterns and content
+    const advisorKeywords = ['help', 'support', 'check', 'eligibility', 'benefits', 'allowance', 'services', 'assessment', 'form', 'apply']
+    const clientKeywords = ['worried', 'mum', 'mother', 'frustrated', 'don\'t know', 'scared', 'confused', 'difficult']
     
     const lowerTranscript = transcript.toLowerCase()
     const advisorScore = advisorKeywords.filter(word => lowerTranscript.includes(word)).length
     const clientScore = clientKeywords.filter(word => lowerTranscript.includes(word)).length
     
-    return clientScore > advisorScore ? 'Client' : 'Advisor'
+    // Consider speaker alternation patterns
+    const currentTime = Date.now()
+    const timeSinceLastSpeech = speakerPauses.length > 0 ? currentTime - speakerPauses[speakerPauses.length - 1] : 0
+    
+    // If there's been a significant pause (>2 seconds) and we have a previous speaker, likely alternation
+    let speakerFromPattern: 'Advisor' | 'Client' | null = null
+    if (timeSinceLastSpeech > 2000 && lastSpeaker) {
+      speakerFromPattern = lastSpeaker === 'Advisor' ? 'Client' : 'Advisor'
+    }
+    
+    // Combine content analysis with pattern analysis
+    let finalSpeaker: 'Advisor' | 'Client'
+    
+    if (advisorScore > clientScore + 1) {
+      finalSpeaker = 'Advisor'
+    } else if (clientScore > advisorScore + 1) {
+      finalSpeaker = 'Client'
+    } else if (speakerFromPattern) {
+      finalSpeaker = speakerFromPattern
+    } else {
+      // Default to alternating pattern or advisor if uncertain
+      finalSpeaker = lastSpeaker === 'Client' ? 'Advisor' : 'Client'
+    }
+    
+    setLastSpeaker(finalSpeaker)
+    setSpeakerPauses(prev => [...prev.slice(-5), currentTime]) // Keep last 5 timestamps
+    
+    return finalSpeaker
+  }
+
+  const initializeVoiceActivityDetection = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      streamRef.current = stream
+      
+      const audioContext = new AudioContext()
+      const analyser = audioContext.createAnalyser()
+      const microphone = audioContext.createMediaStreamSource(stream)
+      
+      analyser.smoothingTimeConstant = 0.8
+      analyser.fftSize = 1024
+      
+      microphone.connect(analyser)
+      
+      audioContextRef.current = audioContext
+      analyserRef.current = analyser
+      
+      startVoiceActivityMonitoring()
+    } catch (error) {
+      console.warn('Voice activity detection not available:', error)
+    }
+  }
+
+  const startVoiceActivityMonitoring = () => {
+    if (!analyserRef.current) return
+    
+    const analyser = analyserRef.current
+    const bufferLength = analyser.frequencyBinCount
+    const dataArray = new Uint8Array(bufferLength)
+    
+    const checkVoiceActivity = () => {
+      if (!isRecording) return
+      
+      analyser.getByteFrequencyData(dataArray)
+      
+      // Calculate average volume
+      const average = dataArray.reduce((sum, value) => sum + value, 0) / bufferLength
+      const threshold = 25 // Adjust this value based on testing
+      
+      const isCurrentlyActive = average > threshold
+      
+      if (isCurrentlyActive !== voiceActivity) {
+        setVoiceActivity(isCurrentlyActive)
+        
+        if (isCurrentlyActive) {
+          // Voice activity started
+          if (speakerTimeoutRef.current) {
+            clearTimeout(speakerTimeoutRef.current)
+          }
+        } else {
+          // Voice activity stopped - set timeout to clear current speaker
+          speakerTimeoutRef.current = setTimeout(() => {
+            setCurrentSpeaker(null)
+          }, 1500)
+        }
+      }
+    }
+    
+    volumeCheckInterval.current = setInterval(checkVoiceActivity, 100)
+  }
+
+  const stopVoiceActivityDetection = () => {
+    if (volumeCheckInterval.current) {
+      clearInterval(volumeCheckInterval.current)
+      volumeCheckInterval.current = null
+    }
+    
+    if (speakerTimeoutRef.current) {
+      clearTimeout(speakerTimeoutRef.current)
+      speakerTimeoutRef.current = null
+    }
+    
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach(track => track.stop())
+      streamRef.current = null
+    }
+    
+    if (audioContextRef.current) {
+      audioContextRef.current.close()
+      audioContextRef.current = null
+    }
+    
+    analyserRef.current = null
+    setVoiceActivity(false)
+    setCurrentSpeaker(null)
   }
 
   const generateInsights = async (transcript: string, speaker: 'Advisor' | 'Client') => {
@@ -358,6 +484,9 @@ function App() {
     setSessionStarted(true)
     setIsRecording(true)
     
+    // Start voice activity detection
+    initializeVoiceActivityDetection()
+    
     // Start speech recognition if available
     if (recognitionRef.current) {
       try {
@@ -428,11 +557,17 @@ function App() {
     setIsListening(false)
     setInterimTranscript('')
     setCurrentSpeaker(null)
+    setVoiceActivity(false)
+    setLastSpeaker(null)
+    setSpeakerPauses([])
     
     // Stop speech recognition
     if (recognitionRef.current) {
       recognitionRef.current.stop()
     }
+    
+    // Stop voice activity detection
+    stopVoiceActivityDetection()
     
     setTranscriptItems([])
     setInsights([])
@@ -509,7 +644,7 @@ function App() {
               This will begin recording and AI analysis of the meeting.<br/>
               <span className="text-accent">
                 {recognitionRef.current ? 
-                  "✓ Speech recognition is available - speak naturally during the session" : 
+                  "✓ Speech recognition and voice activity detection available - speak naturally during the session" : 
                   "⚠️ Speech recognition not available - demo mode will show sample conversation"
                 }
               </span>
@@ -538,6 +673,12 @@ function App() {
               </p>
             </div>
             <div className="flex items-center gap-3">
+              {voiceActivity && (
+                <Badge variant="outline" className="bg-secondary/20 border-secondary text-secondary-foreground px-3 py-1">
+                  <div className="w-2 h-2 bg-secondary-foreground rounded-full animate-pulse mr-2" />
+                  Voice Activity
+                </Badge>
+              )}
               {isListening && (
                 <Badge variant="outline" className="bg-accent/20 border-accent text-accent px-3 py-1">
                   <div className="w-2 h-2 bg-accent rounded-full animate-pulse mr-2" />
@@ -603,6 +744,7 @@ function App() {
                       >
                         <p className="font-bold text-sm text-muted-foreground">
                           {currentSpeaker || 'Speaking...'}
+                          {voiceActivity && ' 🎤'}
                         </p>
                         <p className="text-muted-foreground italic">{interimTranscript}</p>
                       </motion.div>
