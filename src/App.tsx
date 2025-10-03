@@ -30,7 +30,8 @@ interface KnowledgeItem {
 }
 
 function App() {
-  const [isRecording, setIsRecording] = useState(true)
+  const [sessionStarted, setSessionStarted] = useState(false)
+  const [isRecording, setIsRecording] = useState(false)
   const [sessionTime, setSessionTime] = useState(0)
   const [currentTime, setCurrentTime] = useState(new Date())
   const [transcriptItems, setTranscriptItems] = useKV<TranscriptItem[]>('transcript-items', [])
@@ -118,12 +119,12 @@ function App() {
       }
     }
 
-    if (isRecording && (transcriptItems?.length || 0) === 0) {
+    if (isRecording && sessionStarted && (transcriptItems?.length || 0) === 0) {
       addTranscriptItem()
       const interval = setInterval(addTranscriptItem, 6000)
       return () => clearInterval(interval)
     }
-  }, [isRecording, transcriptItems?.length])
+  }, [isRecording, sessionStarted, transcriptItems?.length])
 
   const addInsight = (insightData: { type: 'suggestion' | 'alert' | 'safeguarding', text: string }) => {
     const newInsight: InsightItem = {
@@ -169,8 +170,14 @@ function App() {
     }
   }
 
+  const startSession = () => {
+    setSessionStarted(true)
+    setIsRecording(true)
+  }
+
   const endSession = () => {
     setIsRecording(false)
+    setSessionStarted(false)
     setTranscriptItems([])
     setInsights([])
     setKnowledgeItems([])
@@ -179,7 +186,59 @@ function App() {
 
   return (
     <div className="min-h-screen p-4 lg:p-6">
-      <div className="max-w-7xl mx-auto grid grid-cols-1 lg:grid-cols-12 gap-6 min-h-[calc(100vh-2rem)]">
+      {!sessionStarted ? (
+        // Start Screen
+        <div className="max-w-2xl mx-auto flex flex-col items-center justify-center min-h-[calc(100vh-2rem)]">
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="glass-panel p-8 rounded-lg text-center"
+          >
+            <div className="p-4 bg-primary rounded-full w-fit mx-auto mb-6">
+              <Microphone size={32} className="text-primary-foreground" />
+            </div>
+            <h1 className="text-3xl font-bold text-foreground mb-2">
+              Age UK <span className="text-primary font-medium">| Ally</span>
+            </h1>
+            <p className="text-lg text-muted-foreground mb-2">AI Meeting Assistant</p>
+            <p className="text-sm text-muted-foreground mb-8">Age UK Advice Centre, Lydney</p>
+            
+            <div className="space-y-4 mb-8 text-left">
+              <div className="flex items-center gap-3">
+                <Scroll size={20} className="text-primary" />
+                <span className="text-foreground">Live transcript generation</span>
+              </div>
+              <div className="flex items-center gap-3">
+                <Sparkle size={20} className="text-accent" />
+                <span className="text-foreground">AI insights & suggestions</span>
+              </div>
+              <div className="flex items-center gap-3">
+                <Books size={20} className="text-secondary-foreground" />
+                <span className="text-foreground">Knowledge base integration</span>
+              </div>
+              <div className="flex items-center gap-3">
+                <Flag size={20} className="text-accent" />
+                <span className="text-foreground">Safeguarding alerts</span>
+              </div>
+            </div>
+
+            <Button 
+              onClick={startSession}
+              size="lg"
+              className="bg-primary hover:bg-primary/90 text-primary-foreground px-8 py-3 text-lg"
+            >
+              <Microphone size={20} className="mr-2" />
+              Start Session
+            </Button>
+            
+            <p className="text-xs text-muted-foreground mt-4">
+              This will begin recording and AI analysis of the meeting
+            </p>
+          </motion.div>
+        </div>
+      ) : (
+        // Main Application
+        <div className="max-w-7xl mx-auto grid grid-cols-1 lg:grid-cols-12 gap-6 min-h-[calc(100vh-2rem)]">
         
         {/* Header */}
         <header className="lg:col-span-12 glass-panel p-4 flex justify-between items-center rounded-lg">
@@ -342,7 +401,8 @@ function App() {
           </div>
         </footer>
 
-      </div>
+        </div>
+      )}
     </div>
   )
 }
