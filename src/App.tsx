@@ -3,7 +3,7 @@ import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { ScrollArea } from '@/components/ui/scroll-area'
-import { Microphone, Scroll, Sparkle, Books, Flag, Square, Clock } from '@phosphor-icons/react'
+import { Microphone, Scroll, Sparkle, Books, Flag, Square, Clock, MicrophoneSlash } from '@phosphor-icons/react'
 import { useKV } from '@github/spark/hooks'
 import { motion, AnimatePresence } from 'framer-motion'
 
@@ -29,18 +29,77 @@ interface KnowledgeItem {
   timestamp: Date
 }
 
+// Extend the global Window interface for Web Speech API
+declare global {
+  interface Window {
+    SpeechRecognition: typeof SpeechRecognition
+    webkitSpeechRecognition: typeof SpeechRecognition
+  }
+}
+
+interface SpeechRecognition extends EventTarget {
+  continuous: boolean
+  interimResults: boolean
+  lang: string
+  start(): void
+  stop(): void
+  abort(): void
+  onstart: ((this: SpeechRecognition, ev: Event) => any) | null
+  onend: ((this: SpeechRecognition, ev: Event) => any) | null
+  onresult: ((this: SpeechRecognition, ev: SpeechRecognitionEvent) => any) | null
+  onerror: ((this: SpeechRecognition, ev: SpeechRecognitionErrorEvent) => any) | null
+}
+
+interface SpeechRecognitionEvent extends Event {
+  results: SpeechRecognitionResultList
+  resultIndex: number
+}
+
+interface SpeechRecognitionErrorEvent extends Event {
+  error: string
+  message: string
+}
+
+interface SpeechRecognitionResultList {
+  length: number
+  item(index: number): SpeechRecognitionResult
+  [index: number]: SpeechRecognitionResult
+}
+
+interface SpeechRecognitionResult {
+  length: number
+  item(index: number): SpeechRecognitionAlternative
+  [index: number]: SpeechRecognitionAlternative
+  isFinal: boolean
+}
+
+interface SpeechRecognitionAlternative {
+  transcript: string
+  confidence: number
+}
+
+declare var SpeechRecognition: {
+  prototype: SpeechRecognition
+  new(): SpeechRecognition
+}
+
 function App() {
   const [sessionStarted, setSessionStarted] = useState(false)
   const [isRecording, setIsRecording] = useState(false)
+  const [isListening, setIsListening] = useState(false)
   const [sessionTime, setSessionTime] = useState(0)
   const [currentTime, setCurrentTime] = useState(new Date())
   const [transcriptItems, setTranscriptItems] = useKV<TranscriptItem[]>('transcript-items', [])
   const [insights, setInsights] = useKV<InsightItem[]>('insights', [])
   const [knowledgeItems, setKnowledgeItems] = useKV<KnowledgeItem[]>('knowledge-items', [])
+  const [currentSpeaker, setCurrentSpeaker] = useState<'Advisor' | 'Client' | null>(null)
+  const [isProcessing, setIsProcessing] = useState(false)
+  const [interimTranscript, setInterimTranscript] = useState('')
   
   const transcriptRef = useRef<HTMLDivElement>(null)
   const insightsRef = useRef<HTMLDivElement>(null)
   const knowledgeRef = useRef<HTMLDivElement>(null)
+  const recognitionRef = useRef<SpeechRecognition | null>(null)
 
   const mockTranscriptData = [
     { speaker: 'Advisor' as const, text: "Thank you for coming in. Please, take a seat. How can I help you today?" },
@@ -65,6 +124,153 @@ function App() {
     { title: "Learned Knowledge: Gloucester Council Housing Support", source: "Learned Knowledge", snippet: "Recent cases show that the council's discretionary housing payment has been successful for short-term rent shortfalls for clients in similar situations." }
   ]
 
+  // Initialize speech recognition
+  useEffect(() => {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition
+    if (SpeechRecognition) {
+      const recognition = new SpeechRecognition()
+      recognition.continuous = true
+      recognition.interimResults = true
+      recognition.lang = 'en-GB'
+      
+      recognition.onstart = () => {
+        setIsListening(true)
+      }
+      
+      recognition.onend = () => {
+        setIsListening(false)
+        if (isRecording) {
+          // Restart recognition if session is still active
+          setTimeout(() => {
+            recognition.start()
+          }, 100)
+        }
+      }
+      
+      recognition.onresult = (event) => {
+        let interimTranscript = ''
+        let finalTranscript = ''
+        
+        for (let i = event.resultIndex; i < event.results.length; i++) {
+          const transcript = event.results[i][0].transcript
+          if (event.results[i].isFinal) {
+            finalTranscript += transcript
+          } else {
+            interimTranscript += transcript
+          }
+        }
+        
+        setInterimTranscript(interimTranscript)
+        
+        if (finalTranscript.trim()) {
+          processTranscript(finalTranscript.trim())
+        }
+      }
+      
+      recognition.onerror = (event) => {
+        console.error('Speech recognition error:', event.error)
+        setIsListening(false)
+      }
+      
+      recognitionRef.current = recognition
+    }
+  }, [])
+
+  const processTranscript = async (transcript: string) => {
+    if (!transcript.trim()) return
+    
+    setIsProcessing(true)
+    setInterimTranscript('')
+    
+    try {
+      // Determine speaker using simple heuristics (in real app, this would be more sophisticated)
+      const speaker = determineSpeaker(transcript)
+      
+      const newItem: TranscriptItem = {
+        id: `transcript-${Date.now()}`,
+        speaker,
+        text: transcript,
+        timestamp: new Date()
+      }
+      
+      setTranscriptItems(prev => [...(prev || []), newItem])
+      
+      // Generate AI insights based on the transcript
+      await generateInsights(transcript, speaker)
+      
+      // Generate knowledge suggestions
+      await generateKnowledge(transcript)
+      
+    } catch (error) {
+      console.error('Error processing transcript:', error)
+    } finally {
+      setIsProcessing(false)
+    }
+  }
+
+  const determineSpeaker = (transcript: string): 'Advisor' | 'Client' => {
+    // Simple heuristics - in real app this would use speaker identification
+    const advisorKeywords = ['help', 'support', 'check', 'eligibility', 'benefits', 'allowance', 'services']
+    const clientKeywords = ['worried', 'mum', 'mother', 'frustrated', 'don\'t know', 'scared']
+    
+    const lowerTranscript = transcript.toLowerCase()
+    const advisorScore = advisorKeywords.filter(word => lowerTranscript.includes(word)).length
+    const clientScore = clientKeywords.filter(word => lowerTranscript.includes(word)).length
+    
+    return clientScore > advisorScore ? 'Client' : 'Advisor'
+  }
+
+  const generateInsights = async (transcript: string, speaker: 'Advisor' | 'Client') => {
+    try {
+      const prompt = (window as any).spark.llmPrompt`
+        Analyze this transcript from an Age UK advice session and provide insights.
+        
+        Speaker: ${speaker}
+        Text: "${transcript}"
+        
+        Provide insights in one of these categories:
+        - "alert": Emotional state or risk indicators
+        - "suggestion": Advice for the advisor
+        - "safeguarding": Immediate concerns requiring action
+        
+        Respond with a single insight as JSON: {"type": "alert|suggestion|safeguarding", "text": "your insight"}
+      `
+      
+      const response = await (window as any).spark.llm(prompt, 'gpt-4o-mini', true)
+      const insight = JSON.parse(response)
+      
+      if (insight.type && insight.text) {
+        addInsight(insight)
+      }
+    } catch (error) {
+      console.error('Error generating insights:', error)
+    }
+  }
+
+  const generateKnowledge = async (transcript: string) => {
+    try {
+      const prompt = (window as any).spark.llmPrompt`
+        Based on this transcript from an Age UK advice session, suggest relevant knowledge resources.
+        
+        Text: "${transcript}"
+        
+        If relevant, provide a knowledge item as JSON:
+        {"title": "Resource Title", "source": "The Bible|Learned Knowledge", "snippet": "Brief helpful excerpt"}
+        
+        Only respond if there's a clear match to housing, benefits, care, or Age UK services. Otherwise respond with null.
+      `
+      
+      const response = await (window as any).spark.llm(prompt, 'gpt-4o-mini', true)
+      const knowledge = JSON.parse(response)
+      
+      if (knowledge && knowledge.title) {
+        addKnowledgeItem(knowledge)
+      }
+    } catch (error) {
+      console.error('Error generating knowledge:', error)
+    }
+  }
+
   useEffect(() => {
     const timer = setInterval(() => {
       if (isRecording) {
@@ -83,48 +289,26 @@ function App() {
     return () => clearInterval(timeTimer)
   }, [])
 
+  // Auto-scroll transcript to bottom
   useEffect(() => {
-    let transcriptIndex = 0
-    
-    const addTranscriptItem = () => {
-      if (transcriptIndex < mockTranscriptData.length && isRecording) {
-        const item = mockTranscriptData[transcriptIndex]
-        const newItem: TranscriptItem = {
-          id: `transcript-${Date.now()}`,
-          speaker: item.speaker,
-          text: item.text,
-          timestamp: new Date()
-        }
-        
-        setTranscriptItems(prev => [...(prev || []), newItem])
-
-        // Trigger insights based on content
-        if (item.text.includes("frustrated")) {
-          addInsight(mockInsights[0])
-        }
-        if (item.text.includes("eviction notice")) {
-          addKnowledgeItem(mockKnowledge[0])
-          addInsight(mockInsights[1])
-        }
-        if (item.text.includes("Attendance Allowance")) {
-          addKnowledgeItem(mockKnowledge[1])
-          addKnowledgeItem(mockKnowledge[2])
-        }
-        if (item.text.includes("much to eat")) {
-          addInsight(mockInsights[2])
-          setTimeout(() => addInsight(mockInsights[3]), 2000)
-        }
-
-        transcriptIndex++
-      }
+    if (transcriptRef.current) {
+      transcriptRef.current.scrollTop = transcriptRef.current.scrollHeight
     }
+  }, [transcriptItems, interimTranscript])
 
-    if (isRecording && sessionStarted && (transcriptItems?.length || 0) === 0) {
-      addTranscriptItem()
-      const interval = setInterval(addTranscriptItem, 6000)
-      return () => clearInterval(interval)
+  // Auto-scroll insights to bottom
+  useEffect(() => {
+    if (insightsRef.current) {
+      insightsRef.current.scrollTop = insightsRef.current.scrollHeight
     }
-  }, [isRecording, sessionStarted, transcriptItems?.length])
+  }, [insights])
+
+  // Auto-scroll knowledge to bottom
+  useEffect(() => {
+    if (knowledgeRef.current) {
+      knowledgeRef.current.scrollTop = knowledgeRef.current.scrollHeight
+    }
+  }, [knowledgeItems])
 
   const addInsight = (insightData: { type: 'suggestion' | 'alert' | 'safeguarding', text: string }) => {
     const newInsight: InsightItem = {
@@ -173,15 +357,105 @@ function App() {
   const startSession = () => {
     setSessionStarted(true)
     setIsRecording(true)
+    
+    // Start speech recognition if available
+    if (recognitionRef.current) {
+      try {
+        recognitionRef.current.start()
+      } catch (error) {
+        console.error('Error starting speech recognition:', error)
+        // Fallback to demo mode
+        startDemoMode()
+      }
+    } else {
+      // Fallback to demo mode if speech recognition not available
+      startDemoMode()
+    }
+  }
+
+  const startDemoMode = () => {
+    // Start the mockup conversation as fallback
+    let transcriptIndex = 0
+    
+    const addMockTranscript = () => {
+      if (transcriptIndex < mockTranscriptData.length && isRecording) {
+        const item = mockTranscriptData[transcriptIndex]
+        const newItem: TranscriptItem = {
+          id: `transcript-${Date.now()}`,
+          speaker: item.speaker,
+          text: item.text,
+          timestamp: new Date()
+        }
+        
+        setTranscriptItems(prev => [...(prev || []), newItem])
+
+        // Trigger insights based on content
+        if (item.text.includes("frustrated")) {
+          addInsight(mockInsights[0])
+        }
+        if (item.text.includes("eviction notice")) {
+          addKnowledgeItem(mockKnowledge[0])
+          addInsight(mockInsights[1])
+        }
+        if (item.text.includes("Attendance Allowance")) {
+          addKnowledgeItem(mockKnowledge[1])
+          addKnowledgeItem(mockKnowledge[2])
+        }
+        if (item.text.includes("much to eat")) {
+          addInsight(mockInsights[2])
+          setTimeout(() => addInsight(mockInsights[3]), 2000)
+        }
+
+        transcriptIndex++
+      }
+    }
+
+    // Start demo conversation
+    setTimeout(addMockTranscript, 1000)
+    const interval = setInterval(addMockTranscript, 6000)
+    
+    // Clean up interval when session ends
+    const cleanup = () => {
+      clearInterval(interval)
+    }
+    
+    return cleanup
   }
 
   const endSession = () => {
     setIsRecording(false)
     setSessionStarted(false)
+    setIsListening(false)
+    setInterimTranscript('')
+    setCurrentSpeaker(null)
+    
+    // Stop speech recognition
+    if (recognitionRef.current) {
+      recognitionRef.current.stop()
+    }
+    
     setTranscriptItems([])
     setInsights([])
     setKnowledgeItems([])
     setSessionTime(0)
+  }
+
+  const toggleRecording = () => {
+    if (isRecording) {
+      setIsRecording(false)
+      if (recognitionRef.current) {
+        recognitionRef.current.stop()
+      }
+    } else {
+      setIsRecording(true)
+      if (recognitionRef.current) {
+        try {
+          recognitionRef.current.start()
+        } catch (error) {
+          console.error('Error starting speech recognition:', error)
+        }
+      }
+    }
   }
 
   return (
@@ -232,7 +506,13 @@ function App() {
             </Button>
             
             <p className="text-xs text-muted-foreground mt-4">
-              This will begin recording and AI analysis of the meeting
+              This will begin recording and AI analysis of the meeting.<br/>
+              <span className="text-accent">
+                {recognitionRef.current ? 
+                  "✓ Speech recognition is available - speak naturally during the session" : 
+                  "⚠️ Speech recognition not available - demo mode will show sample conversation"
+                }
+              </span>
             </p>
           </motion.div>
         </div>
@@ -257,13 +537,27 @@ function App() {
                 {currentTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
               </p>
             </div>
-            {isRecording && (
-              <Badge variant="outline" className="bg-destructive/20 border-destructive text-destructive px-3 py-1.5">
-                <div className="w-3 h-3 bg-destructive rounded-full glowing-dot mr-2" />
-                <span className="font-semibold mr-2">REC</span>
-                <span className="font-mono">{formatTime(sessionTime)}</span>
-              </Badge>
-            )}
+            <div className="flex items-center gap-3">
+              {isListening && (
+                <Badge variant="outline" className="bg-accent/20 border-accent text-accent px-3 py-1">
+                  <div className="w-2 h-2 bg-accent rounded-full animate-pulse mr-2" />
+                  Listening
+                </Badge>
+              )}
+              {isProcessing && (
+                <Badge variant="outline" className="bg-primary/20 border-primary text-primary px-3 py-1">
+                  <Sparkle size={14} className="mr-1 animate-spin" />
+                  Processing
+                </Badge>
+              )}
+              {isRecording && (
+                <Badge variant="outline" className="bg-destructive/20 border-destructive text-destructive px-3 py-1.5">
+                  <div className="w-3 h-3 bg-destructive rounded-full glowing-dot mr-2" />
+                  <span className="font-semibold mr-2">REC</span>
+                  <span className="font-mono">{formatTime(sessionTime)}</span>
+                </Badge>
+              )}
+            </div>
           </div>
         </header>
 
@@ -300,6 +594,19 @@ function App() {
                         <p className="text-foreground">{item.text}</p>
                       </motion.div>
                     ))}
+                    {/* Show interim transcript */}
+                    {interimTranscript && (
+                      <motion.div
+                        initial={{ opacity: 0, y: 20 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        className="p-3 rounded-lg max-w-[85%] bg-muted/30 border-2 border-dashed border-muted-foreground/30"
+                      >
+                        <p className="font-bold text-sm text-muted-foreground">
+                          {currentSpeaker || 'Speaking...'}
+                        </p>
+                        <p className="text-muted-foreground italic">{interimTranscript}</p>
+                      </motion.div>
+                    )}
                   </AnimatePresence>
                 </div>
               </ScrollArea>
@@ -384,6 +691,23 @@ function App() {
             </p>
           </div>
           <div className="flex items-center gap-4">
+            <Button 
+              onClick={toggleRecording}
+              variant={isRecording ? "destructive" : "default"}
+              className="bg-accent/20 text-accent hover:bg-accent/30 border-accent"
+            >
+              {isRecording ? (
+                <>
+                  <MicrophoneSlash size={16} className="mr-2" />
+                  Pause Recording
+                </>
+              ) : (
+                <>
+                  <Microphone size={16} className="mr-2" />
+                  Resume Recording
+                </>
+              )}
+            </Button>
             <Button 
               variant="outline" 
               className="bg-accent/20 text-accent hover:bg-accent/30 border-accent"
